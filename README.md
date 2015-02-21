@@ -42,20 +42,23 @@ system. The writes can be either discarded or persisted, persisting
 will enable users to create a snapshot of the changes and later build 
 layers on top if it as if it were the base layer.
 
-### An Example usecase
+### An Usecase
 
 You have to install nginx for you website. The end container on your
 website server will be an nginx process tailor cut for website called
-website-nginx.
+website-nginx. You would also like to reuse your nginx build because
+it has lot of patches made specific for your env.
 
 This can be done in 2 steps
 * getting a specific version of nginx (patched with all crazy stuff)
   called `ops-nginx`
-* use `ops-nginx` to build out rest of the nginx based servers with
-  just changing the conf
+* use `ops-nginx` to build out `website-nginx` server, also this same
+  `ops-nginx` can be used for other servers by just putting the right
+  confs
 
 **step 1**
-Create the ops-nginx image from base os
+Create the ops-nginx image from base os, then can be reused later for
+many other apps
 ```
 (base os)                              -> layer 1
    \_ installing patched nginx         -> layer 2
@@ -64,7 +67,8 @@ Create the ops-nginx image from base os
 ```
 
 **step 2**
-Create the website-nginx image from ops-nginx
+Create the website-nginx image from ops-nginx, a server with a specific set of
+configs and other packages
 ```
 (ops-nginx)                 -> layer 1 (snapshot)
   \_ nginx website conf     -> layer 2 
@@ -99,15 +103,27 @@ real different, **but** lets see couple of ways how we can do it.
 To understand how we can do it, we need to understand the following
 * [loop device](http://en.wikipedia.org/wiki/Loop_device) - mount file as a block device
 * [sparse filesystem](http://en.wikipedia.org/wiki/Sparse_file) - efficiently use FS when it is mostly empty
-* [device mapper](http://en.wikipedia.org/wiki/Device_mapper) - mapping physical block devices onto higher-level virtual block devices [Kernel Device Mapper Doc](https://www.kernel.org/doc/Documentation/device-mapper/)
+* [device mapper](http://en.wikipedia.org/wiki/Device_mapper) - [Kernel Device Mapper Doc](https://www.kernel.org/doc/Documentation/device-mapper/) mapping physical block devices onto higher-level virtual block devices 
   * [snapshotting](https://www.kernel.org/doc/Documentation/device-mapper/snapshot.txt) - snapshot the state of a file system at a give time
   * [thin provisioning](https://www.kernel.org/doc/Documentation/device-mapper/thin-provisioning.txt) - allows many virtual devices to be stored on the same data volume
+
+I will try give some crude examples on device mappers. These examples try to do 2 step snapshots
+
+```
+empty filesystem
+ |
+ +- load filesystem (snapshot 1)
+     |
+     +- edit filesystem (snapshot 2)
+```
+
+If we can achieve this, then we can do this repeatitively, also can make and persist any kind of changes at any level of snapshot.
 
 **NOTE** I am not expert in these domains, only my curiosity lead me to read and write this document. (Other words, don't try in production)
 
 ### Snapshot
 
-An example of how snapshot works. 
+This is a crude HOWTO on a working example of device mapper snapshots.
 
 #### Loop Device
 
@@ -155,7 +171,7 @@ umount /mnt/loados
 
 #### Mark the device as Origin
 
-We will make the newly created `ext4` filesystem as our origin.
+We will make the newly created `ext4` filesystem containing `centos rootfs` as our origin.
 
 ```
 # make /dev/mapper/test-snapshot-base-real as origin 
@@ -299,6 +315,198 @@ umount /tmp/testmnt
 
 Now you have a file that can be mounted.
 
+An astute reader might say, ofcourse you can add files and manipulate the FS but what about installing packages,
+compiling source code pointing to new libraries in the new FS. Answer to that is, _keep reading_, skip to next
+section if you are really curious.
+
+### Thin Provisioning
+
+Compared to the previous implementation of snapshots, is that it allows many virtual devices to
+be stored on the same data volume. Please read the [doc](https://www.kernel.org/doc/Documentation/device-mapper/thin-provisioning.txt) more to understand about it.
+
+An example of how thin provisioning works.
+
+#### Loop Device
+
+**Thin Provisioning** requires a metadata and data store.
+
+```
+# create a sparse 100G data file
+truncate -s100G testthin.block
+# create a sparse 1G metadata file
+truncate -s1G testmetadata.block
+
+# create /dev/loop0
+# -f will find an unused device and use it
+# --show will print the device name
+losetup -f --show testthin.block
+# create /dev/loop1 for metadata
+losetup -f --show testmetadata.block
+# clean it with zeros
+dd if=/dev/zero of=/dev/loop1 bs=4096 count=1
+```
+
+#### Create a Thin Pool
+
+```
+# test-thin-pool => poolname
+# /dev/loop1 /dev/loop0  => metadata and data devices
+# 20971520 => 10GiB (20971520 = 10 * 1024 * 1024 * 1024 / 512)
+# 128 => data blocksize 
+dmsetup create test-thin-pool --table '0 20971520 thin-pool /dev/loop1 /dev/loop0 128 0'
+```
+
+#### Create a Thin Volume
+
+* send message to active pool device
+* activate the new volume (allocate storage)
+
+```
+# create a new thin volume
+# 0 (last arg) => 24 bit identifier
+# 0 (other 0) => sector (512 bytes) in the logical device
+dmsetup message /dev/mapper/test-thin-pool 0 "create_thin 0"
+
+# allocate storage/activate
+# 0  (last arg) => thinp device identifier
+# 2097152 => 1GiB (2097152 sectors = 1024 * 1024 * 1024 / 512)
+dmsetup create test-thin --table '0 2097152 thin /dev/mapper/test-thin-pool 0'
+```
+
+#### Load Data
+
+Load the data to the new thin device. We will use this loaded thin device to
+create snapshots.
+
+```
+# create an ext4 partition
+mkfs.ext4 /dev/mapper/test-thin
+# mount the dir
+mount /dev/mapper/test-thin /mnt/loados
+# load the partition with centos
+tar -xf centos-smaller.tar -C /mnt/loados/
+# unmount it
+umount /mnt/loados/
+```
+
+#### Internal Snapshot
+
+* suspend the origin device whose snapshot is being taken
+* send message "create_snap"
+* resume the origin device
+
+```
+# suspend origin
+dmsetup suspend /dev/mapper/test-thin
+
+# create snapshot
+# 1 => identifier for snapshot
+# 0 => identifier for origin device (last arg 0)
+dmsetup message /dev/mapper/test-thin-pool 0 "create_snap 1 0"
+
+#resume the origin
+dmsetup resume /dev/mapper/test-thin
+```
+
+If you do an `ls -l /dev/mapper` you won't be seeing any snapshot yet.
+
+```
+## ls /dev/mapper/
+control  test-thin  test-thin-pool
+```
+
+#### Activating Internal Snapshot
+
+Once created, the user doesn't have to worry about any connection between the origin and the snapshot.
+It can be worked on like yet another thinly-provisioned device (ie, you can do snapshots on this)
+
+```
+# active the snapshot (note there that we gave 1)
+# 1 => snapshot identifier (same value we gave when we called "create_snap")
+# 2097152 => 1GiB (2097152 sectors = 1024 * 1024 * 1024 / 512)
+dmsetup create snap --table "0 2097152 thin /dev/mapper/pool 1"
+```
+
+If you do a `ls -l /dev/mapper` you should be seeing `test-thin-snap` in the listing
+
+```
+## ls /dev/mapper/
+control  test-thin  test-thin-pool  test-thin-snap
+```
+
+#### Editing Snapshot
+
+Lets mount this thin snapshot and put some data
+
+```
+# mount
+mount /dev/mapper/test-thin-snap /mnt/loados
+# create some new dir
+mkdir /mnt/loados/rootfs/vigith
+# write some data
+echo bar > /mnt/loados/rootfs/vigith/foo
+# umount
+umount /mnt/loados/
+```
+
+#### Internal Snapshot (Again)
+
+This snapshot is exactly same as the earlier discussed _Internal Snapshot_. 
+
+```
+# suspend the origin (origin for this snap, but it is a snapshot of 1st origin)
+dmsetup suspend /dev/mapper/test-thin-snap
+# please note we have incremented identifier to 2 and origin is 1
+# (for the earlier run it was 1 and 0)
+dmsetup message /dev/mapper/test-thin-pool 0 "create_snap 2 1"
+# resume the origin
+dmsetup resume /dev/mapper/test-thin-snap
+```
+
+#### Activating Internal Snapshot (Again)
+
+Same as activating the earlier _Activating Internal Snapshot_, except that the identifier is 2 now (it was 1 before)
+
+```
+# earlier the identifier was 1
+# lets call it test-thin-snap-2
+dmsetup create test-thin-snap-2 --table '0 2097152 thin /dev/mapper/test-thin-pool 2'
+```
+
+#### Load Snapshot
+
+Load the latest snapshot to see the new dir created
+
+```
+mount /dev/mapper/test-thin-snap-2 /mnt/loados
+ls -l /mnt/loados/rootfs/vigith/foo
+# you should be seeing 'bar' as output
+cat /mnt/loados/rootfs/vigith/foo 
+umount /mnt/loados
+```
+
+#### file based FileSystem
+
+If you remember, we start with a file called `testthin.block`. If you run `file testthin.block` or `tune2fs -l testthin.block`
+you will see it is an `ext4` file. Also, you can mount that file to any dir and you will see that it is the merged origin
+you just created.
+
+```
+# run file
+file test.block
+# tune2fs
+tune2fs -l test.block
+# create a mount dir
+mkdir /tmp/testmnt
+# lets mount this test.block
+mount -o loop test.block /tmp/testmnt
+# look for the dir and file we created
+cat /tmp/testmnt/rootfs/vigith_test/foo
+# umount it
+umount /tmp/testmnt
+```
+
+The metadata stored in `testmetadata.block` is useless to us.
 
 # Kernel Namespaces
 
