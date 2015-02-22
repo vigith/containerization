@@ -127,55 +127,55 @@ This is a crude HOWTO on a working example of device mapper snapshots.
 
 #### Loop Device
 
-```
+```shell
 # create a sparse 100G file
-truncate -s100G test.block
+> truncate -s100G test.block
 
 # create /dev/loop0
 # -f will find an unused device and use it
 # --show will print the device name
-losetup -f --show test.block 
+> losetup -f --show test.block 
 ```
 
 Now we have `/dev/loop0` (my example is based on `loop0`, if `loop0` is not free do a `losetup -d /dev/loop0`) attached to `test.block` (file mounted as block device).
 
 #### Create Origin and Snapshot targets
 
-```
+```shell
 # create base target (1953125 = 1000 * 1000 * 1000 / 512)
 # where 512 byte = 1 sector, and GB = 1000 * 1000 * 1000  (it would have been 1024
 # if GiB was the unit)
-dmsetup create test-snapshot-base-real --table '0 1953125 linear /dev/loop0 0'
+> dmsetup create test-snapshot-base-real --table '0 1953125 linear /dev/loop0 0'
 
 # create the cow snapshot target
 # 390625 + 1953125 = 2343750 (== 1.2GB)
-dmsetup create test-snapshot-snap-cow --table '0 390625 linear /dev/loop0 1953125'
+> dmsetup create test-snapshot-snap-cow --table '0 390625 linear /dev/loop0 1953125'
 ```
 
 #### Populate the Origin Device
 I downloaded a centos rootfs (actually I took a docker centos image and converted it to tar via docker2aci). This
 centos tar is named as `centos-latest.tar`.
 
-```
+```shell
 # format the orgin as an ext4 device
-mkfs.ext4 /dev/mapper/test-snapshot-base-real
+> mkfs.ext4 /dev/mapper/test-snapshot-base-real
 # create a dir to mount the new ext4 fs
-mkdir -p /mnt/loados
+> mkdir -p /mnt/loados
 # mount it
-mount /dev/mapper/test-snapshot-base-real /mnt/loados
+> mount /dev/mapper/test-snapshot-base-real /mnt/loados
 # load centos to new ext4
-tar -xf centos-latest.tar -C /mnt/loados/
+> tar -xf centos-latest.tar -C /mnt/loados/
 # umount the dir
-umount /mnt/loados
+> umount /mnt/loados
 ```
 
 #### Mark the device as Origin
 
 We will make the newly created `ext4` filesystem containing `centos rootfs` as our origin.
 
-```
+```shell
 # make /dev/mapper/test-snapshot-base-real as origin 
-dmsetup create test-snapshot-base --table '0 1953125 snapshot-origin /dev/mapper/test-snapshot-base-real'
+> dmsetup create test-snapshot-base --table '0 1953125 snapshot-origin /dev/mapper/test-snapshot-base-real'
 ```
 
 #### Create CoW Snapshot
@@ -183,10 +183,10 @@ dmsetup create test-snapshot-base --table '0 1953125 snapshot-origin /dev/mapper
 This will make a snapshot target, which can be mounted and edited. Snapshot target will be having the origin as its backend (ie,
 if no write is made to snapshot `origin == snapshot`, else all new writes will go to snapshot)
 
-```
+```shell
 # P (2nd last arg) means, make it persistent across reboot
 # 8 (last arg) chunk-size, granularity of the of copying the snapshot
-dmsetup create test-snapshot-cow --table '0 1953125 snapshot /dev/mapper/test-snapshot-base-real /dev/mapper/test-snapshot-snap-cow P 8'
+> dmsetup create test-snapshot-cow --table '0 1953125 snapshot /dev/mapper/test-snapshot-base-real /dev/mapper/test-snapshot-snap-cow P 8'
 ```
 
 Note how the origin device is the not the same device as the one we just created (ie `test-snapshot-base`), but rather the origin's
@@ -194,27 +194,27 @@ underlying device `test-snapshot-base-real`
 
 At this point if you do a `dmsetup status` you will see something as follows
 
-```
+```shell
 ## dmsetup status
-test-snapshot-snap-cow: 0 390625 linear
-test-snapshot-base: 0 1953125 snapshot-origin
-test-snapshot-base-real: 0 1953125 linear
-test-snapshot-cow: 0 1953125 snapshot 16/390625 16
+> test-snapshot-snap-cow: 0 390625 linear
+> test-snapshot-base: 0 1953125 snapshot-origin
+> test-snapshot-base-real: 0 1953125 linear
+> test-snapshot-cow: 0 1953125 snapshot 16/390625 16
 ```
 
 #### Editing on CoW Snapshot
 
 Lets add some data on the CoW Snapshot. The origin won't have these changes but only the CoW snapshot.
 
-```
+```shell
 # mount the CoW device
-mount /dev/mapper/test-snapshot-cow /mnt/loados
+> mount /dev/mapper/test-snapshot-cow /mnt/loados
 # create a dir (one way to edit)
-mkdir /mnt/loados/rootfs/vigith_test
+> mkdir /mnt/loados/rootfs/vigith_test
 # add some data
-echo bar > /mnt/loados/rootfs/vigith_test/foo
+> echo bar > /mnt/loados/rootfs/vigith_test/foo
 # umount the device
-umount /mnt/loados
+> umount /mnt/loados
 ```
 
 #### Merging the Snapshot
@@ -230,31 +230,31 @@ To merge a snapshot,
 * once merge is complete (check it via `dmsetup status`)
 * suspend; replace the snapshot-origin with snapshot-merge; reload
 
-```
+```shell
 ## replace the snapshot-origin target replaced with the snapshot-merge target, and the origin resumed
-dmsetup suspend test-snapshot-base
-dmsetup remove test-snapshot-cow
-dmsetup reload test-snapshot-base --table '0 1953125 snapshot-merge /dev/mapper/test-snapshot-base-real /dev/mapper/test-snapshot-snap-cow P 8'
+> dmsetup suspend test-snapshot-base
+> dmsetup remove test-snapshot-cow
+> dmsetup reload test-snapshot-base --table '0 1953125 snapshot-merge /dev/mapper/test-snapshot-base-real /dev/mapper/test-snapshot-snap-cow P 8'
 ```
 
 if you do a `dmsetup status` you will see that `test-snapshot-cow` is missing now.
 
-```
+```shell
 ## dmsetup status
-test-snapshot-snap-cow: 0 390625 linear
-test-snapshot-base: 0 1953125 snapshot-origin  <--- it is snapshot-origin
-test-snapshot-base-real: 0 1953125 linear
+> test-snapshot-snap-cow: 0 390625 linear
+> test-snapshot-base: 0 1953125 snapshot-origin  <--- it is snapshot-origin
+> test-snapshot-base-real: 0 1953125 linear
 ```
 
 do a resume
-```
-dmsetup resume test-snapshot-base
+```shell
+> dmsetup resume test-snapshot-base
 ```
 
 If you do `dmsetup status`, you will see that `snapshot-origin` became `snapshot-merge`
 
-```
-### dmsetup status
+```shell
+> dmsetup status
 test-snapshot-snap-cow: 0 390625 linear
 test-snapshot-base: 0 1953125 snapshot-merge 16/390625 16  <--- snapshot-merge
 test-snapshot-base-real: 0 1953125 linear 
@@ -262,18 +262,18 @@ test-snapshot-base-real: 0 1953125 linear
 
 suspend; replace the snapshot-origin with snapshot-merge; reload
 
-```
+```shell
 ## dmsetup status output will need be polled to find out then the merge is complete.
 ## Once the merge is complete, the snapshot-merge target should be replaced with the snapshot-origin target
-dmsetup suspend test-snapshot-base
-dmsetup reload test-snapshot-base --table '0 1953125 snapshot-origin /dev/mapper/test-snapshot-base-real'
-dmsetup resume test-snapshot-base
+> dmsetup suspend test-snapshot-base
+> dmsetup reload test-snapshot-base --table '0 1953125 snapshot-origin /dev/mapper/test-snapshot-base-real'
+> dmsetup resume test-snapshot-base
 ```
 
 Now `dmsetup status` will confirm that `snapshot-merge` has become `snapshot-origin`
 
-```
-## dmsetup status
+```shell
+> dmsetup status
 test-snapshot-snap-cow: 0 390625 linear
 test-snapshot-base: 0 1953125 snapshot-origin    <--- snapshot-origin
 test-snapshot-base-real: 0 1953125 linear
@@ -284,13 +284,14 @@ test-snapshot-base-real: 0 1953125 linear
 We should be seeing the new directory we created in here `/mnt/loados/rootfs/vigith_test` and also the file inside
 that dir `/mnt/loados/rootfs/vigith_test/foo`
 
-```
+```shell
 # mount
-mount /dev/mapper/test-snapshot-base /mnt/loados
-# do a cat (you should see 'bar' as output)
-cat /mnt/loados/rootfs/vigith_test/foo
+> mount /dev/mapper/test-snapshot-base /mnt/loados
+# you should be seeing 'bar' as output
+> cat /mnt/loados/rootfs/vigith_test/foo
+bar
 # unmount it
-umount /mnt/loados
+> umount /mnt/loados
 ```
 
 #### file based FileSystem
@@ -298,19 +299,20 @@ umount /mnt/loados
 If you remember, we start with a file called `test.block`. If you run `file test.block` or `tune2fs -l test.block` you will see it is
 an `ext4` file. Also, you can mount that file to any dir and you will see that it is the merged origin you just created
 
-```
+```shell
 # run file
-file test.block
+> file test.block
 # tune2fs
-tune2fs -l test.block
+> tune2fs -l test.block
 # create a mount dir
-mkdir /tmp/testmnt
+> mkdir /tmp/testmnt
 # lets mount this test.block
-mount -o loop test.block /tmp/testmnt
+> mount -o loop test.block /tmp/testmnt
 # look for the dir and file we created  
-cat /tmp/testmnt/rootfs/vigith_test/foo
+> cat /tmp/testmnt/rootfs/vigith_test/foo
+bar
 # umount it
-umount /tmp/testmnt
+> umount /tmp/testmnt
 ```
 
 Now you have a file that can be mounted.
@@ -330,30 +332,30 @@ An example of how thin provisioning works.
 
 **Thin Provisioning** requires a metadata and data store.
 
-```
+```shell
 # create a sparse 100G data file
-truncate -s100G testthin.block
+> truncate -s100G testthin.block
 # create a sparse 1G metadata file
-truncate -s1G testmetadata.block
+> truncate -s1G testmetadata.block
 
 # create /dev/loop0
 # -f will find an unused device and use it
 # --show will print the device name
-losetup -f --show testthin.block
+> losetup -f --show testthin.block
 # create /dev/loop1 for metadata
-losetup -f --show testmetadata.block
+> losetup -f --show testmetadata.block
 # clean it with zeros
-dd if=/dev/zero of=/dev/loop1 bs=4096 count=1
+> dd if=/dev/zero of=/dev/loop1 bs=4096 count=1
 ```
 
 #### Create a Thin Pool
 
-```
+```shell
 # test-thin-pool => poolname
 # /dev/loop1 /dev/loop0  => metadata and data devices
 # 20971520 => 10GiB (20971520 = 10 * 1024 * 1024 * 1024 / 512)
 # 128 => data blocksize 
-dmsetup create test-thin-pool --table '0 20971520 thin-pool /dev/loop1 /dev/loop0 128 0'
+> dmsetup create test-thin-pool --table '0 20971520 thin-pool /dev/loop1 /dev/loop0 128 0'
 ```
 
 #### Create a Thin Volume
@@ -361,16 +363,16 @@ dmsetup create test-thin-pool --table '0 20971520 thin-pool /dev/loop1 /dev/loop
 * send message to active pool device
 * activate the new volume (allocate storage)
 
-```
+```shell
 # create a new thin volume
 # 0 (last arg) => 24 bit identifier
 # 0 (other 0) => sector (512 bytes) in the logical device
-dmsetup message /dev/mapper/test-thin-pool 0 "create_thin 0"
+> dmsetup message /dev/mapper/test-thin-pool 0 "create_thin 0"
 
 # allocate storage/activate
 # 0  (last arg) => thinp device identifier
 # 2097152 => 1GiB (2097152 sectors = 1024 * 1024 * 1024 / 512)
-dmsetup create test-thin --table '0 2097152 thin /dev/mapper/test-thin-pool 0'
+> dmsetup create test-thin --table '0 2097152 thin /dev/mapper/test-thin-pool 0'
 ```
 
 #### Load Data
@@ -378,15 +380,15 @@ dmsetup create test-thin --table '0 2097152 thin /dev/mapper/test-thin-pool 0'
 Load the data to the new thin device. We will use this loaded thin device to
 create snapshots.
 
-```
+```shell
 # create an ext4 partition
-mkfs.ext4 /dev/mapper/test-thin
+> mkfs.ext4 /dev/mapper/test-thin
 # mount the dir
-mount /dev/mapper/test-thin /mnt/loados
+> mount /dev/mapper/test-thin /mnt/loados
 # load the partition with centos
-tar -xf centos-smaller.tar -C /mnt/loados/
+> tar -xf centos-smaller.tar -C /mnt/loados/
 # unmount it
-umount /mnt/loados/
+> umount /mnt/loados/
 ```
 
 #### Internal Snapshot
@@ -395,23 +397,23 @@ umount /mnt/loados/
 * send message "create_snap"
 * resume the origin device
 
-```
+```shell
 # suspend origin
-dmsetup suspend /dev/mapper/test-thin
+> dmsetup suspend /dev/mapper/test-thin
 
 # create snapshot
 # 1 => identifier for snapshot
 # 0 => identifier for origin device (last arg 0)
-dmsetup message /dev/mapper/test-thin-pool 0 "create_snap 1 0"
+> dmsetup message /dev/mapper/test-thin-pool 0 "create_snap 1 0"
 
 #resume the origin
-dmsetup resume /dev/mapper/test-thin
+> dmsetup resume /dev/mapper/test-thin
 ```
 
 If you do an `ls -l /dev/mapper` you won't be seeing any snapshot yet.
 
-```
-## ls /dev/mapper/
+```shell
+> ls /dev/mapper/
 control  test-thin  test-thin-pool
 ```
 
@@ -420,17 +422,17 @@ control  test-thin  test-thin-pool
 Once created, the user doesn't have to worry about any connection between the origin and the snapshot.
 It can be worked on like yet another thinly-provisioned device (ie, you can do snapshots on this)
 
-```
+```shell
 # active the snapshot (note there that we gave 1)
 # 1 => snapshot identifier (same value we gave when we called "create_snap")
 # 2097152 => 1GiB (2097152 sectors = 1024 * 1024 * 1024 / 512)
-dmsetup create snap --table "0 2097152 thin /dev/mapper/pool 1"
+> dmsetup create snap --table "0 2097152 thin /dev/mapper/pool 1"
 ```
 
 If you do a `ls -l /dev/mapper` you should be seeing `test-thin-snap` in the listing
 
-```
-## ls /dev/mapper/
+```shell
+> ls /dev/mapper/
 control  test-thin  test-thin-pool  test-thin-snap
 ```
 
@@ -438,51 +440,52 @@ control  test-thin  test-thin-pool  test-thin-snap
 
 Lets mount this thin snapshot and put some data
 
-```
+```shell
 # mount
-mount /dev/mapper/test-thin-snap /mnt/loados
+> mount /dev/mapper/test-thin-snap /mnt/loados
 # create some new dir
-mkdir /mnt/loados/rootfs/vigith
+> mkdir /mnt/loados/rootfs/vigith
 # write some data
-echo bar > /mnt/loados/rootfs/vigith/foo
+> echo bar > /mnt/loados/rootfs/vigith/foo
 # umount
-umount /mnt/loados/
+> umount /mnt/loados/
 ```
 
 #### Internal Snapshot (Again)
 
 This snapshot is exactly same as the earlier discussed _Internal Snapshot_. 
 
-```
+```shell
 # suspend the origin (origin for this snap, but it is a snapshot of 1st origin)
-dmsetup suspend /dev/mapper/test-thin-snap
+> dmsetup suspend /dev/mapper/test-thin-snap
 # please note we have incremented identifier to 2 and origin is 1
 # (for the earlier run it was 1 and 0)
-dmsetup message /dev/mapper/test-thin-pool 0 "create_snap 2 1"
+> dmsetup message /dev/mapper/test-thin-pool 0 "create_snap 2 1"
 # resume the origin
-dmsetup resume /dev/mapper/test-thin-snap
+> dmsetup resume /dev/mapper/test-thin-snap
 ```
 
 #### Activating Internal Snapshot (Again)
 
 Same as activating the earlier _Activating Internal Snapshot_, except that the identifier is 2 now (it was 1 before)
 
-```
+```shell
 # earlier the identifier was 1
 # lets call it test-thin-snap-2
-dmsetup create test-thin-snap-2 --table '0 2097152 thin /dev/mapper/test-thin-pool 2'
+> dmsetup create test-thin-snap-2 --table '0 2097152 thin /dev/mapper/test-thin-pool 2'
 ```
 
 #### Load Snapshot
 
 Load the latest snapshot to see the new dir created
 
-```
-mount /dev/mapper/test-thin-snap-2 /mnt/loados
-ls -l /mnt/loados/rootfs/vigith/foo
+```shell
+> mount /dev/mapper/test-thin-snap-2 /mnt/loados
+> ls -l /mnt/loados/rootfs/vigith/foo
 # you should be seeing 'bar' as output
-cat /mnt/loados/rootfs/vigith/foo 
-umount /mnt/loados
+> cat /mnt/loados/rootfs/vigith/foo
+bar
+> umount /mnt/loados
 ```
 
 #### file based FileSystem
@@ -491,19 +494,20 @@ If you remember, we start with a file called `testthin.block`. If you run `file 
 you will see it is an `ext4` file. Also, you can mount that file to any dir and you will see that it is the merged origin
 you just created.
 
-```
+```shell
 # run file
-file test.block
+> file test.block
 # tune2fs
-tune2fs -l test.block
+> tune2fs -l test.block
 # create a mount dir
-mkdir /tmp/testmnt
+> mkdir /tmp/testmnt
 # lets mount this test.block
-mount -o loop test.block /tmp/testmnt
+> mount -o loop test.block /tmp/testmnt
 # look for the dir and file we created
-cat /tmp/testmnt/rootfs/vigith_test/foo
+> cat /tmp/testmnt/rootfs/vigith_test/foo
+bar
 # umount it
-umount /tmp/testmnt
+> umount /tmp/testmnt
 ```
 
 The metadata stored in `testmetadata.block` is of on much use to us (or maybe, i am just unaware)
@@ -720,7 +724,7 @@ code and do an `ip addr` on the child bash promt, you will be seeing only `lo` i
 ..snip..
 ```
 
-`ip addr` on bash process create with `CLONE_NEWNET`
+`ip addr` on bash process created with `CLONE_NEWNET`
 
 ```shell
 > ./bash_ex
