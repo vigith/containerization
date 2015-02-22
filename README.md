@@ -506,12 +506,261 @@ cat /tmp/testmnt/rootfs/vigith_test/foo
 umount /tmp/testmnt
 ```
 
-The metadata stored in `testmetadata.block` is useless to us.
+The metadata stored in `testmetadata.block` is of on much use to us (or maybe, i am just unaware)
 
 # Kernel Namespaces
 
-# cgroups
+`clone` syscall, really! that is all about kernel namespaces.
+
+Using Kernel Namespaces, we achieve process isolation 
+
+* ipc - InterProcess Communication (flag: `CLONE_NEWIPC`)
+* mnt - Mount points (flag: `CLONE_NEWNS`)
+* pid - Process ID  (flag: `CLONE_NEWPID`)
+* net - Networking (flag: `CLONE_NEWNET`)
+* uts - set of identifiers returned by `uname(2)` (flag: `CLONE_NEWUTS`)
+
+## clone syscall
+
+When a process is created, the new process inherits most of the parent process flags. To use
+namespaces we just need to pass the right flags.
+
+```c
+int clone(int (*fn)(void *), void *child_stack,
+   int flags, void *arg, ...
+   /* pid_t *ptid, struct user_desc *tls, pid_t *ctid */ );
+```
+
+The 3rd argument is the flags.
+
+For eg, `clone(fn_child, child_stack, CLONE_NEWPID|CLONE_NEWNET, &fn_child_args);` can be called to create
+a child process with a new `net` and `pid` namespace.
+
+### Clone /bin/bash
+
+To understand Kernel Namespaces, lets write a sample clone code and start building on it. The major change
+will be in `static int clone_flags = SIGCHLD;` where we will add more flags. This code when executed will
+run a new `bash` process in the child context.
+
+```c
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <sched.h>
+#include <errno.h>
+#include <string.h>
+
+#define STACKSIZE (1024*1024)
+
+/* the flags */
+static int clone_flags = SIGCHLD | CLONE_NEWUTS;
+
+/* fn_child_exec is the func that will be executed by clone
+   and when this function returns, the child process will be
+   terminated */
+static int fn_child_exec(void *arg) {
+  char * const cmd[] = { "/bin/bash", NULL};
+  fprintf(stderr, "Child Pid: [%d] Invoking Command [%s] \n", getpid(), cmd[0]);
+  if (execv(cmd[0], cmd) != 0) {
+    fprintf(stderr, "Failed to Run [%s] (Error: %s)\n", cmd[0], strerror(errno));
+    exit(-1);
+  }
+  /* exec never returns */
+  exit(EXIT_FAILURE);
+}
+
+int main(int argc, char *argv) {
+  char *child_stack = (char *)malloc(STACKSIZE*sizeof(char));
+
+  /* create a new process, the function fn_child_exec will be called */
+  pid_t pid = clone(fn_child_exec, child_stack + STACKSIZE, clone_flags, NULL);
+    
+  if (pid < 0) {
+    fprintf(stderr, "clone failed (Reason: %s)\n", strerror(errno));
+    exit(EXIT_FAILURE);
+  }
+  /* lets wait on our child process here before we, the parent, exits */
+  if (waitpid(pid, NULL, 0) == -1) {
+    fprintf(stderr, "'waitpid' for pid [%d] failed (Reason: %s)\n", pid, strerror(errno));
+    exit(EXIT_FAILURE);
+  }
+
+  return 0;
+}
+```
+
+To compile, save this code (TODO: save this as a git code) as `clone_example.c`
+
+```shell
+> gcc clone_example.c -o bash_ex
+```
+
+Now when you run `./bash_ex`, you will get a new bash child process.
+
+```shell
+> ./bash_ex 
+Child Pid: [13225] Invoking Command [/bin/bash]
+```
+
+### ipc
+
+`man` page of clone describes the `CLONE_NEWIPC` flag as below
+
+```
+If  CLONE_NEWIPC  is set, then create the process in a new IPC namespace.  If this flag is not set,
+then (as with fork(2)), the process is created in the same IPC namesace as the calling process.
+This flag is intended for the implementation of containers.
+```
+
+#### Example
+
+Recompile the code after changing `static int clone_flags = SIGCHLD;` **to** `static int clone_flags = SIGCHLD|CLONE_NEWIPC;`
+
+We will create a Shared Memory Segment in the parent shell and we will confirm that we can see the segment
+we created
+
+```shell
+# create a segment
+> ipcmk -M 4096
+
+# list the shared memory segments
+> ipcs -m
+------ Shared Memory Segments --------
+key        shmid      owner      perms      bytes      nattch     status
+0x6b68f06d 0          ec2-user   644        4096       0              
+```
+
+Now run the `./bash_ex` you just created (with the new flag), now when you do `ipcs -m`, you won't be seeing the
+segments created earlier, because you are in a new IPC Namesace.
+
+```shell
+# cloned process with CLONE_NEWIPC set
+> ./bash_ex
+Child Pid: [12624] Invoking Command [/bin/bash]
+
+## no shared memory listed
+> ipcs -m
+------ Shared Memory Segments --------
+key        shmid      owner      perms      bytes      nattch     status      
+```
+
+### mnt
+
+`CLONE_NEWNS` creates a new mount namespace. If the child process you created has set `CLONE_NEWNS`, then the `mount(2)` and
+`umount(2)` system calls will only affect the child process (or processes that live in the same namespace). You can have
+multiple process in same mount namespace if you create new child processes without setting `CLONE_NEWNS`.
+
+Recompile the code after changing `static int clone_flags = SIGCHLD;` **to** `static int clone_flags = SIGCHLD|CLONE_NEWNS;`
+
+Run the `./bash_ex`, we will `umount` `tmpfs` and prove that it only got removed in child process, not in the parent.
+
+```shell
+> ./bash_ex
+Child Pid: [12785] Invoking Command [/bin/bash]
+## list the mount type tmpfs
+> mount -l -t tmpfs
+tmpfs on /dev/shm type tmpfs (rw,relatime)
+## unmount tmpfs
+> umount tmpfs
+## show that the tmpfs got unmounted
+> mount -l -t tmpfs
+```
+
+While in the shell (or anything process) they will still see `tmpfs` mounted.
+
+```shell
+## tmpfs is still mounted
+> mount -l -t tmpfs
+tmpfs on /dev/shm type tmpfs (rw,relatime)
+```
+
+**NOTE**: Please don't mistake mount namespace with process jailing, this has nothing to do with jailing.
+
+### pid
+
+```
+A PID namespace provides an isolated environment for PIDs: PIDs in a new namespace start at 1, somewhat like a standalone system, and calls to
+fork(2), vfork(2), or clone()  will  produce processes with PIDs that are unique within the namespace. The  first  process  created  in  a new
+namespace (i.e., the process created using the CLONE_NEWPID flag) has the PID 1, and is the "init" process for the namespace. Children that are
+orphaned within the namespace will be reparented to this process rather than init(8).
+```
+
+Recompile the code after changing `static int clone_flags = SIGCHLD;` **to** `static int clone_flags = SIGCHLD|CLONE_NEWPID;`
+
+Execute the code and check the pid of the process, it should be `1`
+
+```shell
+> ./bash_ex
+Child Pid: [1] Invoking Command [/bin/bash]
+> echo $$
+1
+```
+
+If you do a `pstree` or `ps auxwww`, you will see lot of other processes too. This is because those tools work by reading
+`/proc` dir and our `/proc` is still pointing to the parent process's namespace.
+
+### net
+
+Recompile the code after changing `static int clone_flags = SIGCHLD;` **to** `static int clone_flags = SIGCHLD|CLONE_NEWNET;`
+
+If you do `ip addr` on the terminal you will be seeing multiple interfaces, like `lo`, `eth0` etc. Now execute the newly compiled
+code and do an `ip addr` on the child bash promt, you will be seeing only `lo` interface.
+
+`ip addr` on normal bash prompt
+
+```shell
+> ip addr
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+..snip..
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 9001 qdisc pfifo_fast state UP qlen 1000
+    link/ether 0a:a5:84:25:0a:db brd ff:ff:ff:ff:ff:ff
+..snip..
+```
+
+`ip addr` on bash process create with `CLONE_NEWNET`
+
+```shell
+> ./bash_ex
+Child Pid: [13182] Invoking Command [/bin/bash]
+## only lo is shown
+> ip addr
+1: lo: <LOOPBACK> mtu 65536 qdisc noop state DOWN
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+..snip..
+```
+
+### uts
+
+```
+A UTS namespace is the set of identifiers returned by uname(2); among these, the domain name and the host name can be modified
+by setdomainname(2) and sethostname(2),  respectively Changes made to the identifiers in a UTS namespace are visible to all
+other processes in the same namespace, but are not visible to processes in other UTS namespaces.
+```
+
+Recompile the code after changing `static int clone_flags = SIGCHLD;` **to** `static int clone_flags = SIGCHLD|CLONE_NEWUTS;`
+
+We should be able to change the hostname in the new process and still not affect the hostname of the global namespace. 
+
+```shell
+> ./bash_ex
+Child Pid: [13225] Invoking Command [/bin/bash]
+# change the hostname
+> hostname foo.bar
+> hostname
+foo.bar
+```
+
+While the hostname as per the global namespace is still unaltered. 
+```shell
+## hostname of the system
+> hostname
+test.qa
+```
+
+# Process Containers (cgroups)
 
 # Networking
-
 
