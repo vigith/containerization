@@ -559,7 +559,7 @@ run a new `bash` process in the child context.
 #define STACKSIZE (1024*1024)
 
 /* the flags */
-static int clone_flags = SIGCHLD | CLONE_NEWUTS;
+static int clone_flags = SIGCHLD;
 
 /* fn_child_exec is the func that will be executed by clone
    and when this function returns, the child process will be
@@ -617,8 +617,6 @@ If  CLONE_NEWIPC  is set, then create the process in a new IPC namespace.  If th
 then (as with fork(2)), the process is created in the same IPC namesace as the calling process.
 This flag is intended for the implementation of containers.
 ```
-
-#### Example
 
 Recompile the code after changing `static int clone_flags = SIGCHLD;` **to** `static int clone_flags = SIGCHLD|CLONE_NEWIPC;`
 
@@ -767,4 +765,274 @@ test.qa
 # Process Containers (cgroups)
 
 # Networking
+
+* veth - Virtual Ethernet device that comes in as a pair device, anything that is send to one device will come out from the other
+* bridge - Virtual Ethernet Bridge Device
+* netns - Network Namespace
+
+## Inter Container Communication
+
+```
++--------------+                                     +--------------+
+|              |                                     |              |
+| Container 1 (iface)  <====== (bridge) ======> (iface) Container 2 |
+|              |                                     |              |
++--------------+                                     +--------------+
+```
+
+* create a bridge
+* activate the bridge
+* create a vethA pair (vethA1/vethA2)
+* set bridge as the master to one end of the veth pair (vethA1)
+* bring the vethA1 up
+* attach the vethA2 to your container namespace (container1)
+  * name the vethA2 interface as eth1 (optional)
+  * give ip addr to interface (use the new name or use vethA2)
+  * bring up the interface
+  * do an `arping` to make sure interface is good
+* create another veth pair (vethB1/vethB2)
+* set bridge as the master to one end of the veth pair (vethB1)
+* bring the vethB1 up
+* attach the vethB2 to your other container namespace  (container2)
+  * name the vethB2 interface as eth1 (optional)
+  * give ip addr to interface (use the new name or use vethB2)
+  * bring up the interface
+  * do an `arping` to make sure interface is good
+
+
+### Example
+
+Start two process with new network namespace. In case you forgot HOWTO, 
+recompile the template code we wrote for Kernel Namespaces after changing
+`static int clone_flags = SIGCHLD;` **to** `static int clone_flags = SIGCHLD|CLONE_NEWNET;`
+When you execute the compiled binary, you will get two process in two differen network namespaces.
+
+By default there two comtainers won't have any interface attached other than `lo`, so they won't be
+able to talk to each other. Lets make them talk!
+
+**Start Process 1** (prompt 1)
+```shell
+# process 1
+> ./bash_ex
+Child Pid: [2264] Invoking Command [/bin/bash]
+```
+
+**Start Process 2** (prompt 2)
+```shell
+# process 2
+> ./bash_ex
+Child Pid: [2307] Invoking Command [/bin/bash]
+```
+
+**On the Global Namespace**
+```shell
+# to make life easier, lets set the 2 pids as our
+# namespaces
+# (pid from prompt1)
+> pidA=2264
+# (pid from prompt2)
+> pidB=2307
+
+# make it ready for `ip netns` to read
+# (strace told me so)
+> mkdir -p /var/run/netns
+> ln -s /proc/$pidA/ns/net /var/run/netns/$pidA
+> ln -s /proc/$pidB/ns/net /var/run/netns/$pidB
+
+# create the bridge
+> ip link add dev br1 type bridge
+
+# bring up the bridge
+> ip link set br1 up
+
+# veth pair I
+# mtu can be fetched by calling (ip link show br1)
+> ip link add name vethA1 mtu 1500 type veth peer name vethA2 mtu 1500
+
+# enslave vethA1 to br1
+> ip link set vethA1 master br1
+# bring vethA1 up
+> ip link set vethA1 up
+
+# attach other end of veth to a namespace
+> ip link set vethA2 netns $pidA
+# rename vethA2 to eth1 (optional)
+> ip netns exec $pidA ip link set vethA2 name eth1
+# attach an ipaddr to to the interface
+> ip netns exec $pidA ip addr add 192.168.1.1/24 dev eth1
+# bring the interface ip
+> ip netns exec $pidA ip link set eth1 up
+# test by an arping
+> ip netns exec $pidA arping -c 1 -A -I eth1 192.168.1.1
+ARPING 192.168.1.1 from 192.168.1.1 eth1
+Sent 1 probes (1 broadcast(s))
+Received 0 response(s)
+
+# veth pair II
+> ip link add name vethB1 mtu 1500 type veth peer name vethB2 mtu 1500
+
+# enslave vethB1 to br1
+> ip link set vethB1 master br1
+# bring vethB1 up
+> ip link set vethB1 up
+
+# attach vethB to a namespace
+> ip link set vethB2 netns $pidB
+# rename to eth1 (optional)
+> ip netns exec $pidB ip link set vethB2 name eth1
+# attach an ipaddr to interface
+> ip netns exec $pidB ip addr add 192.168.1.2/24 dev eth1
+# bring the interface up
+> ip netns exec $pidB ip link set eth1 up
+# arping test
+> ip netns exec $pidB arping -c 1 -A -I eth1 192.168.1.2
+ARPING 192.168.1.2 from 192.168.1.2 eth1
+Sent 1 probes (1 broadcast(s))
+Received 0 response(s)
+
+# remove the stuffs we brought in
+> unlink /var/run/netns/$pidA
+> unlink /var/run/netns/$pidB
+> rmdir /var/run/netns
+```
+
+#### Testing the Setup
+
+In the prompt you created (that is how you got the PID). Try to do a connect.
+
+**Prompt 1**
+```shell
+> ./bash_ex
+Child Pid: [2264] Invoking Command [/bin/bash]
+> ip addr
+1: lo: <LOOPBACK> mtu 65536 qdisc noop state DOWN
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+4: eth1: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP qlen 1000
+    link/ether 6a:8f:4a:61:97:90 brd ff:ff:ff:ff:ff:ff
+    inet 192.168.1.1/24 scope global eth1
+..snip..
+# list on one container
+> nc -l 1234
+hi
+```
+
+**Prompt 2**
+```shell
+> ./bash_ex
+Child Pid: [2264] Invoking Command [/bin/bash]
+> ip addr
+1: lo: <LOOPBACK> mtu 65536 qdisc noop state DOWN
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+6: eth1: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP qlen 1000
+    link/ether 1e:44:08:bf:a5:ad brd ff:ff:ff:ff:ff:ff
+    inet 192.168.1.2/24 scope global eth1
+..snip..
+# talk to the other container 
+> echo "hi" | nc 192.168.1.1 1234
+> 
+```
+
+
+To poke into your docker network namespace `netns`, you need to link to `/var/run/netns` and use `ip netns exec`
+(ip command looks into the var dir to get info). [man(7) namespaces](http://man7.org/linux/man-pages/man7/namespaces.7.html) has more
+info about the `/proc/$pid/ns` namespaces.
+
+eg,
+```shell
+# it might be missing
+> mkdir -p /var/run/netns
+
+# link the process in the container
+# you should find $pid
+> ln -s /proc/$pid/ns/net /var/run/netns/$pid
+
+# list your namespaces (it should return the pid)
+> ip netns ls
+<pid>
+
+# list the interfaces in 
+> ip netns exec <pid> ip addr
+....info about interface in the namespace <pid> ...
+
+# please remove what you did after you are done with the experiments
+> unlink /var/run/netns/$pid
+# don't force delete, someone else too might be mucking around :-)
+> rmdir /var/run/netns
+```
+
+Curious mind can do `tcpdump -i br0 -n ` (provided br0 is your bridge name) to see packets going back and
+forth.
+
+## Host to Container Communication
+
+```
++---------------------------------------+
+|                                       |
+|   +-----------+                       |
+|   |           |                       |
+|   | Container |                       |
+|   |          (iface) <===== bridge    |
+|   +-----------+               ^       |
+|                               |       |
+|  Host                        (iface)  |
++---------------------------------------+
+```
+
+* create a bridge
+* activate the bridge
+* create a vethA pair (vethA1/vethA2)
+* set bridge as the master to one end of the veth pair (vethA1)
+* bring the vethA1 up
+* attach the vethA2 to your container namespace (container1)
+  * name the vethA2 interface as eth1 (optional)
+  * give ip addr to interface (use the new name or use vethA2)
+  * bring up the interface
+  * do an `arping` to make sure interface is good
+  * add routing entry from container to bridge
+* assign ip addr to bridge
+* add routing entry from host to container (via bridge)
+
+We need to attach one end of the veth pair to the container while the other end to the global namespace. Here we
+need to manually assign ip to the bridge `br1` and also add the routing table entry from host to the container
+and also add a routing entry back from container to host (via veth endpoint)
+
+**Start Process 1** (promt 1)
+```shell
+> ./bash_ex
+Child Pid: [2264] Invoking Command [/bin/bash]
+```
+
+**On Global Namespace**
+```shell
+# pid from the prompt1
+> pidA=2264
+
+# make network namespace visible to `ip netns`
+> mkdir -p /var/run/netns
+> ln -s /proc/$pidA/ns/net /var/run/netns/$pidA
+
+# setup the veth
+> ip link add dev br1 type bridge
+> ip link set br1 up
+
+> ip link add name vethA1 mtu 1500 type veth peer name vethA2 mtu 1500
+> ip link set vethA1 master br1
+> ip link set vethA1 up
+> ip link set vethA2 netns $pidA
+
+> ip netns exec $pidA ip link set vethA2 name eth1
+> ip netns exec $pidA ip addr add 192.168.1.1/24 dev eth1
+> ip netns exec $pidA ip link set eth1 up
+> ip netns exec $pidA arping -c 1 -A -I eth1 192.168.1.1
+ARPING 192.168.1.1 from 192.168.1.1 eth1
+Sent 1 probes (1 broadcast(s))
+Received 0 response(s)
+# route entry back to the host
+> ip netns exec $pidA ip route add 192.168.2.0/24 dev eth1 proto kernel  scope link src 192.168.1.1
+
+# add ip addr to bridge
+> ip addr add 192.168.2.1/24 dev br1
+# add a route entry
+> ip route add 192.168.1.0/24 dev br1 proto kernel  scope link src 192.168.2.1 
+```
 
