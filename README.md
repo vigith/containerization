@@ -609,7 +609,8 @@ int main(int argc, char *argv) {
     fprintf(stderr, "clone failed (Reason: %s)\n", strerror(errno));
     exit(EXIT_FAILURE);
   }
-  /* lets wait on our child process here before we, the parent, exits */
+  /* wait on our child process the parent exits, else init will reap it.
+     we could also do other book keeping in the parent to use cgroups etc */
   if (waitpid(pid, NULL, 0) == -1) {
     fprintf(stderr, "'waitpid' for pid [%d] failed (Reason: %s)\n", pid, strerror(errno));
     exit(EXIT_FAILURE);
@@ -1212,3 +1213,9 @@ bash,1
   └─bash,22 -i
         └─pstree,46 -a -p
 ```
+
+# Miscellaneous
+
+I am learning and new to this, so there will be a lot of bugs and misunderstanding of
+concepts. Please send me pull requests if you find something really preposterous.
+
