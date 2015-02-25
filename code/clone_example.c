@@ -1,11 +1,13 @@
-#define _GNU_SOURCE
+// Author: Vigith Maurice
+
+#define _GNU_SOURCE             /* CLONE_NEW* flags need this */
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <sched.h>
 #include <errno.h>
-#include <string.h>
+#include <string.h>             /* required for strerror() */
 
 #define STACKSIZE (1024*1024)
 
@@ -36,7 +38,8 @@ int main(int argc, char *argv) {
     fprintf(stderr, "clone failed (Reason: %s)\n", strerror(errno));
     exit(EXIT_FAILURE);
   }
-  /* lets wait on our child process here before we, the parent, exits */
+  /* wait on our child process the parent exits, else init will reap it.
+     we could also do other book keeping in the parent to use cgroups etc */
   if (waitpid(pid, NULL, 0) == -1) {
     fprintf(stderr, "'waitpid' for pid [%d] failed (Reason: %s)\n", pid, strerror(errno));
     exit(EXIT_FAILURE);
