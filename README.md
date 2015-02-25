@@ -1,11 +1,21 @@
 # Understanding Containerization
 
 I was quite baffled first time when I saw docker running centos on an amazon linux. 
-I thought I will jot down all I understand about `docker` (may be `rkt` in future) so 
-someone  can save some time without needing to read a whole lot of documents.
+I thought I will jot down all I understand about containers so someone  can save some time 
+without needing to read a whole lot of documents. In this document I will try to achieve most
+(all) of the concepts without using any [docker](https://www.docker.com/) (or [rkt](https://github.com/coreos/rocket)) 
+commands so we can know how these tools work behind the scene.
 
 **NOTE** : As of today this document references docker, but it should
-  be true for other systems too.
+be true for other systems too. These topics covered here are only showing the proof
+of concept. Tools like `docker`, `rkt`, etc wraps around these tools but they cover
+all the corner cases and all the use cases way more than what is mentioned here.
+
+**DISCLAIMER** I am not an expert in these domains, only my curiosity lead me to read and write this document.
+(Other words, don't try in production)
+
+The reason behind writing this document is in operations world when we debug a production issue, you 
+better know the internals than making foolish assumptions (assumption is the root of all major screw-ups).
 
 # Basic Docker
 
@@ -19,17 +29,20 @@ better (otherwise you might think why the heck am I saying this)
 FROM centos
 ```
 
-If you save the above contents and do a `docker build -t vigith/centos .` followed by a
+If you save the above contents to `Dockerfile` and do a `docker build -t vigith/centos .` followed by a
 `docker run -t -i centos /bin/bash` you will get a `bash` promt in
 `centos` (you can confirm this by doing a `cat /etc/system-release` on
 your new prompt).
 
+It also supports mounting volumes, exposing ports, container linking etc. Though the names sound unfamiliar
+the technology behind it remains the same. Since I am focusing on containers as a whole, I leave it to the
+reader to explore more into `docker`.
 
 # Images
 
 ## UnionFS
 [UnionFS](http://en.wikipedia.org/wiki/UnionFS) lets you overlay files
-and directories of different filesystem be overlaid forming a single
+and directories of different filesystem forming a single unified mountable
 filesystem. The merged single filesystem will have no duplicates and
 later layers take precedence over former layers such that we will end up
 in a new unified coherent virtual filesystem. Couple of well know UnionFS
@@ -119,8 +132,6 @@ empty filesystem
 
 If we can achieve this, then we can do this repeatitively, also can make and persist any kind of changes at any level of snapshot.
 
-**NOTE** I am not expert in these domains, only my curiosity lead me to read and write this document. (Other words, don't try in production)
-
 ### Snapshot
 
 This is a crude HOWTO on a working example of device mapper snapshots.
@@ -195,11 +206,11 @@ underlying device `test-snapshot-base-real`
 At this point if you do a `dmsetup status` you will see something as follows
 
 ```shell
-## dmsetup status
-> test-snapshot-snap-cow: 0 390625 linear
-> test-snapshot-base: 0 1953125 snapshot-origin
-> test-snapshot-base-real: 0 1953125 linear
-> test-snapshot-cow: 0 1953125 snapshot 16/390625 16
+> dmsetup status
+test-snapshot-snap-cow: 0 390625 linear
+test-snapshot-base: 0 1953125 snapshot-origin
+test-snapshot-base-real: 0 1953125 linear
+test-snapshot-cow: 0 1953125 snapshot 16/390625 16
 ```
 
 #### Editing on CoW Snapshot
@@ -210,9 +221,9 @@ Lets add some data on the CoW Snapshot. The origin won't have these changes but 
 # mount the CoW device
 > mount /dev/mapper/test-snapshot-cow /mnt/loados
 # create a dir (one way to edit)
-> mkdir /mnt/loados/rootfs/vigith_test
+> mkdir /mnt/loados/vigith_test
 # add some data
-> echo bar > /mnt/loados/rootfs/vigith_test/foo
+> echo bar > /mnt/loados/vigith_test/foo
 # umount the device
 > umount /mnt/loados
 ```
@@ -228,7 +239,9 @@ To merge a snapshot,
 * merge the snapshot via `snapshot-merge`
 * resume
 * once merge is complete (check it via `dmsetup status`)
-* suspend; replace the snapshot-origin with snapshot-merge; reload
+* suspend
+* replace the snapshot-origin with snapshot-merge
+* reload
 
 ```shell
 ## replace the snapshot-origin target replaced with the snapshot-merge target, and the origin resumed
@@ -240,10 +253,10 @@ To merge a snapshot,
 if you do a `dmsetup status` you will see that `test-snapshot-cow` is missing now.
 
 ```shell
-## dmsetup status
-> test-snapshot-snap-cow: 0 390625 linear
-> test-snapshot-base: 0 1953125 snapshot-origin  <--- it is snapshot-origin
-> test-snapshot-base-real: 0 1953125 linear
+> dmsetup status
+test-snapshot-snap-cow: 0 390625 linear
+test-snapshot-base: 0 1953125 snapshot-origin  <--- it is snapshot-origin
+test-snapshot-base-real: 0 1953125 linear
 ```
 
 do a resume
@@ -281,14 +294,14 @@ test-snapshot-base-real: 0 1953125 linear
 
 #### Load snapshot-origin to check for merge
 
-We should be seeing the new directory we created in here `/mnt/loados/rootfs/vigith_test` and also the file inside
-that dir `/mnt/loados/rootfs/vigith_test/foo`
+We should be seeing the new directory we created in here `/mnt/loados/vigith_test` and also the file inside
+that dir `/mnt/loados/vigith_test/foo`
 
 ```shell
 # mount
 > mount /dev/mapper/test-snapshot-base /mnt/loados
 # you should be seeing 'bar' as output
-> cat /mnt/loados/rootfs/vigith_test/foo
+> cat /mnt/loados/vigith_test/foo
 bar
 # unmount it
 > umount /mnt/loados
@@ -296,7 +309,7 @@ bar
 
 #### file based FileSystem
 
-If you remember, we start with a file called `test.block`. If you run `file test.block` or `tune2fs -l test.block` you will see it is
+If you remember, we started with a file called `test.block`. If you run `file test.block` or `tune2fs -l test.block` you will see it is
 an `ext4` file. Also, you can mount that file to any dir and you will see that it is the merged origin you just created
 
 ```shell
@@ -308,8 +321,8 @@ an `ext4` file. Also, you can mount that file to any dir and you will see that i
 > mkdir /tmp/testmnt
 # lets mount this test.block
 > mount -o loop test.block /tmp/testmnt
-# look for the dir and file we created  
-> cat /tmp/testmnt/rootfs/vigith_test/foo
+# look for the dir and file we created
+> cat /tmp/testmnt/vigith_test/foo
 bar
 # umount it
 > umount /tmp/testmnt
@@ -319,7 +332,7 @@ Now you have a file that can be mounted.
 
 An astute reader might say, ofcourse you can add files and manipulate the FS but what about installing packages,
 compiling source code pointing to new libraries in the new FS. Answer to that is, _keep reading_, skip to next
-section if you are really curious.
+section (`pivot_root`) if you are really curious.
 
 ### Thin Provisioning
 
@@ -444,9 +457,9 @@ Lets mount this thin snapshot and put some data
 # mount
 > mount /dev/mapper/test-thin-snap /mnt/loados
 # create some new dir
-> mkdir /mnt/loados/rootfs/vigith
+> mkdir /mnt/loados/vigith_test
 # write some data
-> echo bar > /mnt/loados/rootfs/vigith/foo
+> echo bar > /mnt/loados/vigith_test/foo
 # umount
 > umount /mnt/loados/
 ```
@@ -481,9 +494,9 @@ Load the latest snapshot to see the new dir created
 
 ```shell
 > mount /dev/mapper/test-thin-snap-2 /mnt/loados
-> ls -l /mnt/loados/rootfs/vigith/foo
+> ls -l /mnt/loados/vigith_test/foo
 # you should be seeing 'bar' as output
-> cat /mnt/loados/rootfs/vigith/foo
+> cat /mnt/loados/vigith_test/foo
 bar
 > umount /mnt/loados
 ```
@@ -495,22 +508,33 @@ you will see it is an `ext4` file. Also, you can mount that file to any dir and 
 you just created.
 
 ```shell
-# run file
-> file test.block
-# tune2fs
-> tune2fs -l test.block
+# mounting the thin-snapshots is little different from snapshots
+
+# load the thin block
+> losetup -f --show testthin.block
+# load the metadata
+> losetup -f --show testmetadata.block
+# create the pool
+> dmsetup create test-thin-pool --table '0 20971520 thin-pool /dev/loop1 /dev/loop0 128 0'
+# create the thin device
+> dmsetup create test-thin --table '0 2097152 thin /dev/mapper/test-thin-pool 0'
 # create a mount dir
 > mkdir /tmp/testmnt
 # lets mount this test.block
-> mount -o loop test.block /tmp/testmnt
+> mount /dev/mapper/test-thin /mnt/testmnt
 # look for the dir and file we created
-> cat /tmp/testmnt/rootfs/vigith_test/foo
+> cat /tmp/testmnt/vigith_test/foo
 bar
 # umount it
 > umount /tmp/testmnt
 ```
 
-The metadata stored in `testmetadata.block` is of on much use to us (or maybe, i am just unaware)
+### Layering
+
+If you are thinking how is layering done, it is not done by operating system. `docker` has an `fsdiff.go` program
+which does it. Basically you do a diff between the archive that is brought in by `pull` and the changes you made.
+
+FIXME: If I am wrong
 
 # Kernel Namespaces
 
@@ -537,7 +561,7 @@ int clone(int (*fn)(void *), void *child_stack,
 
 The 3rd argument is the flags.
 
-For eg, `clone(fn_child, child_stack, CLONE_NEWPID|CLONE_NEWNET, &fn_child_args);` can be called to create
+For eg, `clone(fn_child, child_stack, SIGCHLD|CLONE_NEWPID|CLONE_NEWNET, &fn_child_args);` can be called to create
 a child process with a new `net` and `pid` namespace.
 
 ### Clone /bin/bash
@@ -762,7 +786,93 @@ While the hostname as per the global namespace is still unaltered.
 test.qa
 ```
 
-# Process Containers (cgroups)
+# Resource Management (cgroups)
+
+[redhat cgroup Doc](https://access.redhat.com/documentation/en-US/Red_Hat_Enterprise_Linux/6/html/Resource_Management_Guide/index.html) is a very
+beautiful doc for resource management per process. Reading this document is a **must** to really understand and use it more efficiently. [Kernel
+Doc](https://www.kernel.org/doc/Documentation/cgroups/cgroups.txt) has the implementation details. [cgroup Subsystem level doc](https://www.kernel.org/doc/Documentation/cgroups/)
+is useful when you want to tweak each subsystem.
+
+cgroups (control groups) is a Linux kernel feature that limits, accounts for and isolates the resource usage (CPU, memory, disk I/O, network, etc.)
+of a collection of processes. cgroups allow you to allocate resources—such as CPU time, system memory, network bandwidth, or combinations of
+these resources—among user-defined groups of tasks (processes) running on a system.
+
+I will just show an example on how to do it, me trying to explain cgroups will be doing injustice to the cgroups :-)
+
+## Limiting Memory
+
+As you know, cgroups doesn't have any system call by itself but uses the VFS system calls to implement it. `cgroups` 
+filesytem is mounted in `/cgroups`. So to limit memory we just need to put a cap on `memory.limit_in_bytes` and
+`memory.memsw.limit_in_bytes` in `/cgroups/memory/<subgroup>/`.
+
+```shell
+# create the subgroup
+> mkdir /cgroup/memory/test/
+# jump to newly created subgroup
+> cd /cgroup/memory/test/
+# list the cgroup
+> lscgroup
+..snip..
+memory:/
+memory:/test
+..snip..
+```
+
+Now lets write a quick code to use 1MB of memory and make sure it is able to run.
+
+```shell
+# create an array with elements 1 to 1024x1024x10 > 1M
+> perl -le '@x=[1..1024*1024*10]; print "done"'
+done
+```
+
+Using `cgroups` we can put a cap limit on the process, for **memory and swap**
+
+```shell
+# cap on memory
+> echo $((1024*1024)) > /cgroup/memory/test/memory.limit_in_bytes
+# cap on swap too (else it will swap out and run)
+> echo $((1024*1024)) > /cgroup/memory/test/memory.memsw.limit_in_bytes
+# run the process in the newly create cgroups `test` (And get killed)
+> cgexec -g memory:test perl -le '@x=[1..1024*1024*10];print "done"'
+Killed
+# We can check the `dmesg` to confirm it
+> dmesg | tail
+[76470.936104]  [<ffffffff8148b948>] page_fault+0x28/0x30
+[76470.938226] Task in /test killed as a result of limit of /test
+[76470.940815] memory: usage 1024kB, limit 1024kB, failcnt 7
+[76470.943113] memory+swap: usage 1024kB, limit 1024kB, failcnt 0
+[76470.945670] kmem: usage 0kB, limit 18014398509481983kB, failcnt 0
+[76470.948289] Memory cgroup stats for /test: cache:0KB rss:1024KB rss_huge:0KB mapped_file:0KB writeback:0KB swap:0KB inactive_anon:0KB active_anon:976KB inactive_file:0KB active_file:0KB unevictable:0KB
+[76470.957530] [ pid ]   uid  tgid total_vm      rss nr_ptes swapents oom_score_adj name
+[76470.960909] [ 4986]     0  4986    85839      595      22        0             0 perl
+[76470.964260] Memory cgroup out of memory: Kill process 4986 (perl) score 2339 or sacrifice child
+[76470.968144] Killed process 4986 (perl) total-vm:343356kB, anon-rss:828kB, file-rss:1552kB
+>
+```
+
+You can also `cgroup.proc` file to achieve the same without using `cgexec`.
+
+```
+ - cgroup.procs: list of thread group IDs in the cgroup.  This list is
+   not guaranteed to be sorted or free of duplicate TGIDs, and userspace
+   should sort/uniquify the list if this property is required.
+   Writing a thread group ID into this file moves all threads in that
+   group into this cgroup.
+```
+
+To use `cgroup.proc`, we just need to write your pid to `/cgroup/memory/test/cgroup.procs` (you
+might think who created this file, when you create a subgroup via mkdir, this file gets created
+for you)
+
+```shell
+> echo $$ > /cgroup/memory/test/cgroup.procs
+> perl -le '@x=[1..1024*1024*10];print "done"'
+Killed
+```
+
+`cgroup` is very powerful, I would suggest you to read the doc before implementing it.
+
 
 # Networking
 
@@ -828,9 +938,9 @@ Child Pid: [2307] Invoking Command [/bin/bash]
 ```shell
 # to make life easier, lets set the 2 pids as our
 # namespaces
-# (pid from prompt1)
+# (pid from prompt 1)
 > pidA=2264
-# (pid from prompt2)
+# (pid from prompt 2)
 > pidB=2307
 
 # make it ready for `ip netns` to read
@@ -898,7 +1008,8 @@ Received 0 response(s)
 
 #### Testing the Setup
 
-In the prompt you created (that is how you got the PID). Try to do a connect.
+In the prompt you created (that is how you got the PID). Try to do a connect. (Reuse the same prompt,
+don't kill the process already created (and thus the namespaces))
 
 **Prompt 1**
 ```shell
@@ -996,7 +1107,7 @@ We need to attach one end of the veth pair to the container while the other end 
 need to manually assign ip to the bridge `br1` and also add the routing table entry from host to the container
 and also add a routing entry back from container to host (via veth endpoint)
 
-**Start Process 1** (promt 1)
+**Start Process 1** (prompt 1)
 ```shell
 > ./bash_ex
 Child Pid: [2264] Invoking Command [/bin/bash]
@@ -1004,7 +1115,7 @@ Child Pid: [2264] Invoking Command [/bin/bash]
 
 **On Global Namespace**
 ```shell
-# pid from the prompt1
+# pid from the prompt 1
 > pidA=2264
 
 # make network namespace visible to `ip netns`
@@ -1036,3 +1147,68 @@ Received 0 response(s)
 > ip route add 192.168.1.0/24 dev br1 proto kernel  scope link src 192.168.2.1 
 ```
 
+#### Testing the Setup
+
+Reuse the same prompt, don't kill the process (and thus the namespaces)
+
+Start `nc` on containter
+**Prompt 1**
+```shell
+> ./bash_ex
+Child Pid: [2264] Invoking Command [/bin/bash]
+> nc -l 1234
+hi
+```
+
+Send "hi" to port `1234` listening on container using `nc`. You should be seeing "hi" in the container.
+**Global Namespace**
+```shell
+> echo hi | nc 192.168.1.1 1234
+```
+
+
+# pivot_root / chroot
+
+[pivot_root](http://man7.org/linux/man-pages/man8/pivot_root.8.html) moves the root file system of the current process to the
+directory put-old and makes new-root the new root file system. [chroot](http://man7.org/linux/man-pages/man1/chroot.1.html) runs the
+command with a changed root dir. This will help the process run in a rootfs of the of the linux kernel it prefers along with the
+custom libraries.
+
+## Example
+
+Earlier we mentioned about `test.block` which can be mounted and contains the rootfs for `centos`. It also
+contains some changes which we have brought in (a file with content "bar"). You can mount `test.block` and
+make your process run with the new point point as its rootfs.
+
+```shell
+# mount the ext4 filesystem
+> mount -o loop test.block  /tmp/mnt/
+# copy the new code to the new mount
+> cp bash_ex /tmp/mnt
+# change to new root
+> cd /tmp/mnt/
+# dir for pivot_root
+> mkdir put-old
+# pivot root, so you can umount put-old
+> pivot_root . put-old
+# chroot and start your process
+> chroot . ./bash_ex
+# you are now in /
+> pwd
+/
+# ls should return a a view from /
+> ls
+bash_ex  bin  dev  etc  home  lib  lib64  lost+found  media  mnt  opt  proc  put-old  root  run  sbin  selinux  srv  sys  tmp  usr  var  vigith_test
+# mount your proc
+> mount -t proc none /proc
+# put your resolv.conf
+> cat > /etc/resolv.conf
+.. write your stuff ..
+# fill in the mtab
+> cat /proc/mounts > /etc/mtab
+# you are process 1 now
+> pstree -a -p
+bash,1
+  └─bash,22 -i
+        └─pstree,46 -a -p
+```
